@@ -10,6 +10,7 @@ import socketio
 import logging
 import json
 import pathlib
+import base64
 
 from ytdl import DownloadQueueNotifier, DownloadQueue
 from yt_dlp.version import __version__ as yt_dlp_version
@@ -46,9 +47,12 @@ class Config:
         'DEFAULT_THEME': 'auto',
         'DOWNLOAD_MODE': 'limited',
         'MAX_CONCURRENT_DOWNLOADS': 3,
+        'BASIC_AUTH_ENABLED': 'false',
+        'BASIC_AUTH_USERNAME': 'admin',
+        'BASIC_AUTH_PASSWORD': 'password',
     }
 
-    _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'DELETE_FILE_ON_TRASHCAN', 'DEFAULT_OPTION_PLAYLIST_STRICT_MODE', 'HTTPS')
+    _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'DELETE_FILE_ON_TRASHCAN', 'DEFAULT_OPTION_PLAYLIST_STRICT_MODE', 'HTTPS', 'BASIC_AUTH_ENABLED')
 
     def __init__(self):
         for k, v in self._DEFAULTS.items():
@@ -97,7 +101,33 @@ class ObjectSerializer(json.JSONEncoder):
             return json.JSONEncoder.default(self, obj)
 
 serializer = ObjectSerializer()
-app = web.Application()
+
+# HTTP Basic Auth middleware
+@web.middleware
+async def auth_middleware(request, handler):
+    if not config.BASIC_AUTH_ENABLED:
+        return await handler(request)
+
+    if 'socket.io' in request.path:
+        return await handler(request)
+        
+    auth_header = request.headers.get('Authorization')
+    if auth_header:
+        try:
+            auth_type, auth_encoded = auth_header.split(' ', 1)
+            if auth_type.lower() == 'basic':
+                auth_decoded = base64.b64decode(auth_encoded).decode('utf-8')
+                username, password = auth_decoded.split(':', 1)
+                if username == config.BASIC_AUTH_USERNAME and password == config.BASIC_AUTH_PASSWORD:
+                    return await handler(request)
+        except Exception as e:
+            log.error(f"Auth error: {e}")
+    
+    headers = {'WWW-Authenticate': 'Basic realm="Restricted Area"'}
+    return web.Response(status=401, headers=headers, text='Authentication required')
+
+# Setup the application with middleware
+app = web.Application(middlewares=[auth_middleware])
 sio = socketio.AsyncServer(cors_allowed_origins='*')
 sio.attach(app, socketio_path=config.URL_PREFIX + 'socket.io')
 routes = web.RouteTableDef()
